@@ -8,15 +8,15 @@
 
 #define RELAY_PIN 23
 
-String ssid = "";
-String pass = "";
-int connectionTimeout = 300;
+String ssid = "YOUR_SSID";
+String pass = "YOUR_PASSWORD";
 
 std::shared_ptr<GarageDoorAccessory> garage;
+bool homeSpanStarted = false;
 
 void setup() {
-  pinMode(RELAY_PIN, 0X00);
-  // pinMode(RELAY_PIN, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
 
   Serial.begin(115200);
   delay(500);
@@ -24,15 +24,19 @@ void setup() {
   WiFi.mode(WIFI_STA);
   homeSpan.setPairingCode("11112222");
 
+  // Hand WiFi credentials to HomeSpan BEFORE begin() and let HomeSpan own
+  // the WiFi connection from here on. Do NOT call WiFi.begin() in the
+  // sketch: HomeSpan calls it itself on its first poll(), and a second
+  // WiFi.begin() while already connected forces a disconnect/reconnect
+  // cycle (Arduino-ESP32 STAClass::connect() disconnects first when it
+  // sees an active connection). That fight is what caused the endless
+  // "WiFi Connection Lost!" loop.
+  homeSpan.setWifiCredentials(ssid.c_str(), pass.c_str());
+
   Serial.println("* ESP32 booted up.");
 
-
-  ssid = "ssid";
-  pass = "password";
-  
   delay(2000);
   connect();
-#endif
 }
 
 void loop() {
@@ -47,10 +51,10 @@ void loop() {
     handleCommand(command);
   }
 
-  // If we're connected to the WiFi network, poll HomeSpan
-  if (isConnected()) {
-    homeSpan.poll();
-  }
+  // Poll unconditionally. HomeSpan manages WiFi itself, including
+  // reconnecting if the link drops. Gating poll() on WiFi.status()
+  // starves HomeSpan's own connection state machine.
+  homeSpan.poll();
 }
 
 void handleCommand(Command command) {
@@ -123,26 +127,18 @@ void getHostName() {
 }
 
 void connect() {
-  // Pull out our SSID and password
-  const char* ssidChar = ssid.c_str();
-  const char* passChar = pass.c_str();
-
-  // Connect to our WiFi
-  WiFi.begin(ssidChar, passChar);
-  int timeout = 0;
-  while (WiFi.status() != WL_CONNECTED && timeout < connectionTimeout) {
-    delay(1000);
-    timeout++;
-
-    Serial.println("* Connecting for " + String(timeout) + " seconds.");
+  // homeSpan.begin() may only run once; a second CONNECT command must
+  // not re-initialize it.
+  if (homeSpanStarted) {
+    Serial.println("* HomeSpan already started.");
+    return;
   }
 
   homeSpan.begin(Category::GarageDoorOpeners, "Garage Door");
-  homeSpan.setWifiCredentials(ssidChar, passChar);
 
   // Create a new accessory
   new SpanAccessory();
-  
+
   // Add Accessory Information Service with required characteristics
   new Service::AccessoryInformation();
     new Characteristic::Identify();
@@ -160,11 +156,17 @@ void connect() {
     toggleRelayPin();
   };
 
+  homeSpanStarted = true;
+
+  // Note: at this point HomeSpan has not connected yet - it connects on
+  // its first poll(). Expect WL_DISCONNECTED/WL_IDLE_STATUS here; the
+  // "Trying to connect..." / "WiFi Connected!" lines appear right after.
   Serial.println("* WiFi Connection: " + String(wifiStatusDescription(WiFi.status())));
 }
+
 void disconnect() {
   WiFi.disconnect();
-  Serial.println("* Disconnected from WiFi.");
+  Serial.println("* Disconnected from WiFi. HomeSpan will reconnect on its own.");
 }
 
 void reset() {
@@ -172,12 +174,12 @@ void reset() {
   homeSpan.processSerialCommand("U");
 }
 
+// Active-LOW relay module: LOW energizes the relay (button "pressed"),
+// HIGH releases it. 800 ms press, then release.
 void toggleRelayPin() {
-  pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
-  delay(1000);
+  delay(800);
   digitalWrite(RELAY_PIN, LOW);
-  pinMode(RELAY_PIN, 0x00);
 }
 
 bool isConnected() {
